@@ -24,11 +24,13 @@ const (
 
 // App struct
 type App struct {
-	ctx         context.Context
-	exitRun     bool
-	configName  string
-	minInterval int64
-	cycle       int
+	ctx           context.Context
+	exitRun       bool
+	configName    string
+	minInterval   int64
+	cycle         int
+	lastClickTime int64
+	mode          string
 }
 
 type RunParam struct {
@@ -42,8 +44,8 @@ type RunParam struct {
 func NewApp() *App {
 	return &App{
 		exitRun:     false,
-		configName:  "mouse.txt",
-		minInterval: 500,
+		configName:  "mouse",
+		minInterval: 200,
 	}
 }
 
@@ -60,7 +62,7 @@ func (a *App) OnDomReady(ctx context.Context) {
 		ModeEnumList   []ModeEnum `json:"modeEnumList"`
 		MinInterval    int64      `json:"minInterval"`
 	}
-	data.ConfigName = a.configName
+	data.ConfigName = strings.TrimRight(a.configName, ".txt")
 	data.ConfigFileList = make([]string, 0)
 	data.MinInterval = a.minInterval
 
@@ -91,27 +93,37 @@ func (a *App) OnDomReady(ctx context.Context) {
 		if config.IsDir() {
 			continue
 		}
-		data.ConfigFileList = append(data.ConfigFileList, config.Name())
+		data.ConfigFileList = append(data.ConfigFileList, strings.TrimRight(config.Name(), ".txt"))
 	}
 
 	runtime.EventsEmit(ctx, "init", data)
 }
 
+func (a *App) runEnd() {
+	if a.mode == gatherMode {
+		a.writeConfig(fmt.Sprintf("%s:%d\n", intervalMark, a.computeInterval()))
+	}
+	a.exitRun = true
+	runtime.WindowShow(a.ctx)
+	a.sendAlertMsg("程序已退出运行")
+	hook.End()
+}
+
 func (a *App) Run(param RunParam) (res bool) {
-	fmt.Println(param)
 	hook.Register(hook.KeyDown, []string{"q", "Q"}, func(e hook.Event) {
-		a.exitRun = true
-		runtime.WindowShow(a.ctx)
-		a.sendAlertMsg("程序已退出运行")
-		hook.End()
+		a.runEnd()
 	})
 	a.exitRun = false
 
 	if param.ConfigName != "" {
 		a.configName = param.ConfigName
 	}
+	if !strings.HasSuffix(a.configName, ".txt") {
+		a.configName = a.configName + ".txt"
+	}
 	a.minInterval = param.MinInterval
 	a.cycle = param.Cycle
+	a.mode = param.Mode
 
 	if param.Mode == execMode {
 		go a.exec()
@@ -125,14 +137,14 @@ func (a *App) Run(param RunParam) (res bool) {
 }
 
 func (a *App) exec() {
-	a.runBefore(execMode)
+	a.runBefore()
 	xArr, yArr, intervalArr := a.getNeedMoveMousePosition()
 	cycleCount := 0
 	intervalArrLen := len(intervalArr)
 	for {
 		cycleCount++
 		if a.cycle != 0 && cycleCount > a.cycle {
-			robotgo.KeyTap("q")
+			a.runEnd()
 			goto end
 		}
 
@@ -141,7 +153,7 @@ func (a *App) exec() {
 				goto end
 			}
 			robotgo.MoveSmooth(xArr[i], yArr[i], 0.5, 0.5)
-			robotgo.Click("left", true)
+			robotgo.Click()
 			wait := int(a.minInterval)
 			if i < intervalArrLen {
 				wait = intervalArr[i]
@@ -181,16 +193,15 @@ func (a *App) gatherMousePosition() {
 		}
 	}
 
-	a.runBefore(gatherMode)
+	a.runBefore()
 	a.sendAlertMsg("采集运行中：请点击鼠标左键，按q退出")
-	var lastClickTime int64 = 0
 	var interval int64 = 0
 	hook.Register(hook.MouseDown, []string{}, func(e hook.Event) {
 		//如果是左键
 		if e.Button == hook.MouseMap["left"] {
-			if lastClickTime != 0 {
+			if a.lastClickTime != 0 {
 				//获取两次点击时间间隔(毫秒)
-				interval = time.Now().UnixMilli() - lastClickTime
+				interval = a.computeInterval()
 				fmt.Println(interval, a.minInterval)
 				//如果间隔小于1秒，不记录
 				if interval < a.minInterval {
@@ -198,17 +209,21 @@ func (a *App) gatherMousePosition() {
 				}
 				a.writeConfig(fmt.Sprintf("%s:%d\n", intervalMark, interval))
 			}
-			lastClickTime = time.Now().UnixMilli()
+			a.lastClickTime = time.Now().UnixMilli()
 			a.writeConfig(fmt.Sprintf("%s:%d:%d\n", positionMark, e.X, e.Y))
 			a.sendAlertMsg(fmt.Sprintf("采集中：点击x坐标:%d，y坐标:%d，间隔:%d毫秒，按q退出", e.X, e.Y, interval))
 		}
 	})
 }
 
-func (a *App) runBefore(mode string) {
+func (a *App) computeInterval() int64 {
+	return time.Now().UnixMilli() - a.lastClickTime
+}
+
+func (a *App) runBefore() {
 	delay := 3
 	title := "采集"
-	if mode == execMode {
+	if a.mode == execMode {
 		title = "执行"
 	}
 	//每秒发送一次倒计时
